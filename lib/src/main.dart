@@ -17,6 +17,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:network_to_file_image/network_to_file_image.dart';
 import 'package:path/path.dart' as p show joinAll;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:queue/queue.dart';
 
 import 'misc.dart';
 import 'regions/downloadableRegion.dart';
@@ -68,6 +69,8 @@ class StorageCachingTileProvider extends TileProvider {
   ///
   /// Defaults to 20000, set to 0 to disable.
   final int maxStoreLength;
+
+  static var maxParallel = 20;
 
   /// Whether to better enforce the `maxStoreLength`
   ///
@@ -544,8 +547,6 @@ class StorageCachingTileProvider extends TileProvider {
 
   static Stream<List> _downloadBulkFiles({
     required tiles,
-    required int startIndex,
-    required int count,
     required parentDirectory,
     required storeName,
     required provider,
@@ -556,46 +557,43 @@ class StorageCachingTileProvider extends TileProvider {
     required seaTileBytes,
     required compressionQuality,
   }) {
-    int completedTiles = 0;
-
     int successfulTiles = 0;
     List<String> failedTiles = [];
     int seaTiles = 0;
     int existingTiles = 0;
 
     final StreamController<List> streamController = StreamController();
+    final queue = Queue(parallel: maxParallel);
 
-    for (var i = startIndex;
-        i < min(startIndex + count, tiles.length);
-        i += 1) {
-      _getAndSaveTile(
-        parentDirectory,
-        storeName,
-        provider,
-        tiles[i],
-        options,
-        client,
-        errorHandler,
-        preventRedownload,
-        seaTileBytes,
-        compressionQuality,
-      ).then((value) {
+    tiles.forEach((e) {
+      queue
+          .add(() => _getAndSaveTile(
+                parentDirectory,
+                storeName,
+                provider,
+                e,
+                options,
+                client,
+                errorHandler,
+                preventRedownload,
+                seaTileBytes,
+                compressionQuality,
+              ))
+          .then((value) {
         try {
           successfulTiles += value[0] as int;
           if (value[1].isNotEmpty) failedTiles.add(value[1]);
           seaTiles += value[2] as int;
           existingTiles += value[3] as int;
         } catch (e) {}
-
-        completedTiles += 1;
         streamController.add([
-          successfulTiles,
-          failedTiles,
-          seaTiles,
-          existingTiles,
+          value[0],
+          value[1],
+          value[2],
+          value[3],
         ]);
       });
-    }
+    });
 
     return streamController.stream;
   }
@@ -626,13 +624,10 @@ class StorageCachingTileProvider extends TileProvider {
     List<String> failedTiles = [];
     int seaTiles = 0;
     int existingTiles = 0;
-    int completedTiles = 0;
     final DateTime startTime = DateTime.now();
 
     final Stream<List<dynamic>> returned = _downloadBulkFiles(
       tiles: tiles,
-      startIndex: completedTiles,
-      count: tiles.length ~/ 4,
       parentDirectory: parentDirectory,
       storeName: storeName,
       provider: provider,
@@ -645,12 +640,8 @@ class StorageCachingTileProvider extends TileProvider {
     );
 
     await for (final event in returned) {
-      int incrementAmount =
-          min<int>(tiles.length ~/ 4, tiles.length - completedTiles);
-
-      completedTiles += incrementAmount;
       successfulTiles += event[0] as int;
-      if (event[1] != '') failedTiles.addAll(event[1]);
+      if (event[1] != '') failedTiles.add(event[1]);
       seaTiles += event[2] as int;
       existingTiles += event[3] as int;
 
